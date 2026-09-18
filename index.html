@@ -121,6 +121,12 @@ kbd{font-family:var(--ui);font-weight:700;font-size:12px;letter-spacing:.06em;pa
 .role.mim:hover{border-color:rgba(255,46,136,.7);background:rgba(48,6,30,.72)}
 .aside{display:flex;flex-direction:column;gap:22px;padding:22px;background:rgba(10,11,26,.72);border:1px solid var(--line);border-radius:4px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .aside h3{margin:0 0 8px;font-size:14px;letter-spacing:.2em;text-transform:uppercase;color:var(--moon);font-weight:700}
+.qsel{display:flex;flex-wrap:wrap;gap:6px}
+.qsel button{cursor:pointer;padding:6px 12px;font-size:15px;font-weight:600;letter-spacing:.04em;border-radius:3px;border:1px solid var(--line);background:rgba(236,231,255,.05);color:var(--muted)}
+.qsel button[aria-pressed="true"]{background:var(--ember);border-color:var(--ember);color:#1b0e04}
+.qsel button:focus-visible{outline:2px solid var(--moon);outline-offset:2px}
+.qnow{margin:8px 0 0;font-size:14px;color:var(--muted)}
+.qnow:empty{display:none}
 .keys{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:16px;align-items:center;margin:0}
 .keys dt{justify-self:start}
 .keys dd{margin:0;color:#cfc9ee}
@@ -231,6 +237,18 @@ kbd{font-family:var(--ui);font-weight:700;font-size:12px;letter-spacing:.06em;pa
       </div>
       <aside class="aside">
         <div>
+          <h3>Gráficos</h3>
+          <div id="qsel" class="qsel" role="group" aria-label="Calidad gráfica">
+            <button type="button" data-q="auto">Auto</button>
+            <button type="button" data-q="0">Baja</button>
+            <button type="button" data-q="1">Media</button>
+            <button type="button" data-q="2">Alta</button>
+            <button type="button" data-q="3">Ultra</button>
+          </div>
+          <p id="qnow" class="qnow"></p>
+          <p id="swwarn" class="err" hidden>Tu navegador está dibujando sin tarjeta gráfica y el juego irá lento. Activa «Usar aceleración por hardware» en la configuración del navegador (Sistema) y reinícialo.</p>
+        </div>
+        <div>
           <h3>Controles</h3>
           <dl class="keys">
             <dt><kbd>WASD</kbd></dt><dd>Moverse · ratón para mirar</dd>
@@ -324,10 +342,21 @@ const SPEED={walk:4.6,sprint:7.3,flee:5.2,mTrue:5.8,mPlayer:4.6,mObject:2.0};
 const wrap=$('game');
 const renderer=new THREE.WebGLRenderer({antialias:false,powerPreference:'high-performance'});
 const DPR=Math.min(window.devicePixelRatio||1,2);
-// niveles de calidad: la resolución se adapta sola a los FPS
-const QUALITY=[{pr:.7,bloom:false},{pr:1,bloom:true},{pr:Math.min(DPR,1.5),bloom:true},{pr:DPR,bloom:true}];
-const Q_MAX=coarse?1:(DPR>1.5?3:2);
-let qLevel=coarse?1:2;
+// Niveles de calidad. Lo que más cuesta en gráficas integradas es la resolución,
+// el antialiasing sobre búfer de alta precisión, las sombras y la neblina superpuesta.
+const QUALITY=[
+  {name:'Baja', pr:.6, bloom:false,shadow:0,   msaa:0,mist:false},
+  {name:'Media',pr:.85,bloom:true, shadow:1024,msaa:0,mist:true},
+  {name:'Alta', pr:1,  bloom:true, shadow:2048,msaa:4,mist:true},
+  {name:'Ultra',pr:Math.min(DPR,1.5),bloom:true,shadow:2048,msaa:4,mist:true},
+];
+// ¿el navegador dibuja sin tarjeta gráfica? (aceleración por hardware desactivada)
+let softwareGL=false;
+try{ const gl=renderer.getContext(), ext=gl.getExtension('WEBGL_debug_renderer_info'); const name=ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):''; softwareGL=/swiftshader|llvmpipe|software|basic render/i.test(name); }catch(e){}
+const Q_MAX=coarse?1:(DPR>1?3:2);
+let savedQ=null; try{ savedQ=localStorage.getItem('mimico-calidad'); }catch(e){}
+let qAuto=savedQ===null||savedQ==='auto';
+let qLevel=qAuto?(softwareGL?0:coarse?0:1):clamp(+savedQ|0,0,3);
 renderer.setPixelRatio(QUALITY[qLevel].pr);
 renderer.outputEncoding=THREE.sRGBEncoding;
 renderer.shadowMap.enabled=true;
@@ -345,7 +374,7 @@ let composer=null, bloomPass=null;
 try{
   const gl2=renderer.capabilities.isWebGL2, cbf=gl2&&renderer.extensions.get('EXT_color_buffer_float');
   const rt=new THREE.WebGLRenderTarget(512,512,{type:cbf?THREE.HalfFloatType:THREE.UnsignedByteType});
-  if(gl2&&!coarse) rt.samples=4; // MSAA dentro del postproceso
+  if(gl2) rt.samples=QUALITY[qLevel].msaa; // MSAA dentro del postproceso (solo en calidad alta)
   composer=new THREE.EffectComposer(renderer,rt);
   composer.addPass(new THREE.RenderPass(scene,camera));
   bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(512,512),.85,.5,.78);
@@ -369,8 +398,9 @@ const MOON_OFF=new THREE.Vector3(-32,58,-26);
 scene.add(moonL,moonL.target);
 // una sola luz de farol real (la del jugador); los faroles de la IA usan halos en el suelo
 const PLIGHT=new THREE.PointLight(0xffb066,0,11,2); scene.add(PLIGHT);
+// solo 2 luces reales para braseros: se asignan a los más cercanos; el resto usa halo en el suelo
 const BLIGHTS=[];
-for(let i=0;i<5;i++){ const l=new THREE.PointLight(0xff7a2a,0,19,2); scene.add(l); BLIGHTS.push(l); }
+for(let i=0;i<2;i++){ const l=new THREE.PointLight(0xff7a2a,0,19,2); scene.add(l); BLIGHTS.push(l); }
 const MLIGHT=new THREE.PointLight(0xff2e88,0,8,2); scene.add(MLIGHT);
 
 /* =========================================================
@@ -775,6 +805,7 @@ for(const [x,z,w,d] of HOUSES){
 const RUNE_GEO=new THREE.BoxGeometry(.5,.04,.14);
 const RUNE_MAT=new THREE.MeshBasicMaterial({color:0xffffff});
 const RUNE_OFF=new THREE.Color(.16,.1,.42), RUNE_ON=new THREE.Color(2.6,1.2,.35);
+const BHALO_GEO=new THREE.CircleGeometry(8,32); BHALO_GEO.rotateX(-Math.PI/2);
 function makeBrazier(x,z,i){
   const g=new THREE.Group(); g.position.set(x,0,z); STATIC.push(g);
   g.add(mesh(new THREE.CylinderGeometry(1.15,1.3,.32,8),MAT.stoneDark,0,.16,0));
@@ -794,9 +825,10 @@ function makeBrazier(x,z,i){
   const segs=new THREE.InstancedMesh(RUNE_GEO,RUNE_MAT,20), o=new THREE.Object3D();
   for(let k=0;k<20;k++){ const a=k/20*TAU; o.position.set(x+Math.cos(a)*2.3,.03,z+Math.sin(a)*2.3); o.rotation.y=-a-Math.PI/2; o.updateMatrix(); segs.setMatrixAt(k,o.matrix); segs.setColorAt(k,RUNE_OFF); }
   scene.add(segs);
-  const light=BLIGHTS[i]; light.position.set(x,2.5,z);
+  const halo=new THREE.Mesh(BHALO_GEO,new THREE.MeshBasicMaterial({map:softTex,color:0xff7a2a,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false}));
+  halo.position.set(x,.05,z); halo.renderOrder=2; scene.add(halo);
   addC(x,z,1.25);
-  return {i,g,x,z,lit:false,progress:0,flames,coalMat,segs,light,shown:-1,emberT:0};
+  return {i,g,x,z,lit:false,progress:0,flames,coalMat,segs,halo,li:0,shown:-1,emberT:0};
 }
 const BRAZIERS=BR_POS.map(([x,z],i)=>makeBrazier(x,z,i));
 
@@ -867,7 +899,7 @@ const PINE=makePine(), DEAD=makeDeadTree();
 }
 // Neblina baja
 const MIST=[];
-for(let i=0;i<12;i++){
+for(let i=0;i<7;i++){
   const m=new THREE.Mesh(new THREE.PlaneGeometry(34,34),new THREE.MeshBasicMaterial({map:mistTex,transparent:true,opacity:.1,depthWrite:false,color:0x8a98d0}));
   m.rotation.x=-Math.PI/2; m.position.set(R(-38,38),R(.35,1.3),R(-38,38)); m.userData.v=R(-.04,.04); m.userData.sp=R(.2,.5); scene.add(m); MIST.push(m);
 }
@@ -1843,7 +1875,7 @@ function updateBraziersVisual(dt){
     const on=Math.floor(b.progress*20+.001);
     if(on!==b.shown){ b.shown=on; for(let i=0;i<20;i++) b.segs.setColorAt(i,i<on?RUNE_ON:RUNE_OFF); b.segs.instanceColor.needsUpdate=true; }
     const target=b.lit?2.6+Math.sin(T*13+b.i)*.25+Math.sin(T*7.3+b.i*2)*.2:b.progress*.9;
-    b.light.intensity=lerp(b.light.intensity,target,Math.min(1,dt*8));
+    b.li=lerp(b.li,target,Math.min(1,dt*8));
     b.coalMat.emissiveIntensity=.1+b.progress*2.2;
     const fs=b.lit?1:b.progress*.45;
     b.flames.visible=fs>.03;
@@ -1853,6 +1885,18 @@ function updateBraziersVisual(dt){
       while(b.emberT<0){ b.emberT+=.05; sparks.emit(b.x+RR(-.4,.4),2+RR(0,.6),b.z+RR(-.4,.4),RR(-.3,.3),RR(1.2,2.6),RR(-.3,.3),RR(1.2,2.4),RR(.06,.13),1,RR(.35,.6),.12,1,-.2); }
     }
     if(b.pip){ const ps=b.lit?'L':(b.progress*.6).toFixed(2); if(b.pipState!==ps){ b.pipState=ps; b.pip.classList.toggle('lit',b.lit); b.pip.style.setProperty('--p',b.lit?1:ps); } }
+  }
+  // las 2 luces reales van a los braseros encendidos más cercanos a la cámara
+  const cx=camera.position.x, cz=camera.position.z;
+  const ranked=G.braziers.filter(b=>b.li>.05).sort((a,b)=>Math.hypot(a.x-cx,a.z-cz)-Math.hypot(b.x-cx,b.z-cz));
+  for(let i=0;i<BLIGHTS.length;i++){
+    const b=ranked[i], l=BLIGHTS[i];
+    if(b){ l.position.set(b.x,2.5,b.z); l.intensity=b.li; } else l.intensity=0;
+  }
+  for(const b of G.braziers){
+    const real=ranked.indexOf(b)>-1&&ranked.indexOf(b)<BLIGHTS.length;
+    b.halo.visible=b.li>.03;
+    b.halo.material.opacity=b.li*(real?.05:.13);
   }
 }
 function updateTags(){
@@ -1929,7 +1973,7 @@ function updateCamera(dt){
   const fovT=62+(pl.sprinting?7:0)+(pl.rollT>0?5:0)+(pl.isMonster&&pl.y>0?6:0);
   if(Math.abs(camera.fov-fovT)>.02){ camera.fov=lerp(camera.fov,fovT,Math.min(1,dt*6)); camera.updateProjectionMatrix(); updatePointScale(); }
   // la sombra sigue al foco, alineada a texeles para que no parpadee
-  const texel=2*SH/2048, sxp=Math.round(cam.fx/texel)*texel, szp=Math.round(cam.fz/texel)*texel;
+  const texel=2*SH/moonL.shadow.mapSize.x, sxp=Math.round(cam.fx/texel)*texel, szp=Math.round(cam.fz/texel)*texel;
   moonL.target.position.set(sxp,0,szp); moonL.position.set(sxp+MOON_OFF.x,MOON_OFF.y,szp+MOON_OFF.z);
 }
 let hudT=0;
@@ -1996,25 +2040,49 @@ addEventListener('resize',resize); resize();
 function setQuality(l){
   qLevel=clamp(l,0,3); const q=QUALITY[qLevel];
   renderer.setPixelRatio(q.pr);
-  if(composer) composer.setPixelRatio(q.pr);
+  if(composer){
+    composer.setPixelRatio(q.pr);
+    if(renderer.capabilities.isWebGL2) for(const rt of [composer.renderTarget1,composer.renderTarget2]) if(rt.samples!==q.msaa){ rt.samples=q.msaa; rt.dispose(); }
+  }
   if(bloomPass) bloomPass.enabled=q.bloom;
+  moonL.castShadow=q.shadow>0;
+  if(q.shadow&&moonL.shadow.mapSize.x!==q.shadow){ moonL.shadow.mapSize.set(q.shadow,q.shadow); if(moonL.shadow.map){ moonL.shadow.map.dispose(); moonL.shadow.map=null; } }
+  for(const m of MIST) m.visible=q.mist;
   resize();
+  updateQualityUI();
 }
 
-// Calidad adaptativa: baja la resolución si los FPS caen, la sube si sobran
-const Q={acc:0,n:0,good:0,bad:0,upAt:-99,cap:Q_MAX,show:false};
+// Calidad automática: arranca en Media, baja si los FPS caen y sube con cautela si sobran
+const Q={acc:0,n:0,good:0,bad:0,upAt:-99,cap:Math.min(Q_MAX,2),show:false};
 const fpsEl=$('fps');
 function adapt(raw){
   if(raw>.25) return; // pestaña oculta o pausa larga: no medir
   Q.acc+=raw; Q.n++;
   if(Q.acc<1) return;
   const fps=Q.n/Q.acc; Q.acc=0; Q.n=0;
-  if(Q.show) fpsEl.textContent=`${Math.round(fps)} FPS · calidad ${qLevel+1}/4`;
-  if(G.mode==='paused') return;
-  if(fps<45){ Q.good=0; if(++Q.bad>=2&&qLevel>0){ if(T-Q.upAt<8) Q.cap=qLevel-1; setQuality(qLevel-1); Q.bad=0; } }
-  else if(fps>57){ Q.bad=0; if(++Q.good>=5&&qLevel<Q.cap){ setQuality(qLevel+1); Q.upAt=T; Q.good=0; } }
+  if(Q.show) fpsEl.textContent=`${Math.round(fps)} FPS · ${QUALITY[qLevel].name}${qAuto?' (auto)':''}`;
+  if(!qAuto||G.mode==='paused') return;
+  if(fps<48){ Q.good=0; if(++Q.bad>=2&&qLevel>0){ if(T-Q.upAt<10) Q.cap=qLevel-1; setQuality(qLevel-1); Q.bad=0; } }
+  else if(fps>58){ Q.bad=0; if(++Q.good>=6&&qLevel<Q.cap){ setQuality(qLevel+1); Q.upAt=T; Q.good=0; } }
   else { Q.good=0; Q.bad=0; }
 }
+function updateQualityUI(){
+  for(const b of document.querySelectorAll('#qsel button')){
+    const v=b.dataset.q, on=qAuto?v==='auto':v===String(qLevel);
+    b.setAttribute('aria-pressed',on);
+  }
+  const n=$('qnow'); if(n) n.textContent=qAuto?`Ahora: ${QUALITY[qLevel].name}`:'';
+}
+for(const b of document.querySelectorAll('#qsel button')){
+  b.addEventListener('click',()=>{
+    const v=b.dataset.q;
+    qAuto=v==='auto'; Q.cap=Math.min(Q_MAX,2); Q.good=Q.bad=0;
+    try{ localStorage.setItem('mimico-calidad',v); }catch(e){}
+    setQuality(qAuto?(softwareGL?0:1):+v);
+  });
+}
+if(softwareGL) $('swwarn').hidden=false;
+setQuality(qLevel);
 
 resetBraziers([0,3]);
 let last=performance.now();
